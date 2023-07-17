@@ -58,7 +58,7 @@ cron.schedule(
       // Clean up Webflow CMS of any listings no linger in the CREA database
       await removeObsoleteCMSItems(finalData, items);
 
-      const itemIds = newItems.map((item) => item._id);
+      const itemIds = newItems.map((item) => item?._id);
 
       // Publish new CMS items to site
       await publishCMSData(itemIds);
