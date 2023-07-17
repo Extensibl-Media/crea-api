@@ -111,15 +111,15 @@ app.use('/api/v1', api);
 // });
 
 // Get all webflow CMS data for site
-api.get('/webflow-raw-data', async (req, res) => {
-  try {
-    const data = await getWebflowData();
-    return res.status(200).json(data);
-  } catch (error) {
-    console.log(error);
-    return res.status(500).end();
-  }
-});
+// api.get('/webflow-raw-data', async (req, res) => {
+//   try {
+//     const data = await getWebflowData();
+//     return res.status(200).json(data);
+//   } catch (error) {
+//     console.log(error);
+//     return res.status(500).end();
+//   }
+// });
 
 // Clean up CMS
 // api.get('/clean-data', async (req, res) => {
