@@ -52,3 +52,7 @@ export const slugify = (string: string) => {
     .replace(/[\s-]+/g, '-') // Replace spaces and hyphens with a single hyphen
     .trim(); // Trim leading/trailing spaces
 };
+
+export async function waitForCMSTimeout() {
+  return await new Promise((resolve) => setTimeout(resolve, 60 * 1000));
+}

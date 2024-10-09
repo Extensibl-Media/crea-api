@@ -1,84 +1,107 @@
-import Webflow from 'webflow-api';
-import {
-  chunkArray,
-  formatAgentData,
-  getFilteredRoomData,
-  slugify
-} from './helpers';
-import {
-  CMSListingFields,
-  CREAAccessToken,
-  CREALlistingDataRaw,
-  RawCMSFields
-} from './types';
+import { WebflowClient } from 'webflow-api';
+import { chunkArray, slugify, waitForCMSTimeout } from './helpers';
+import { CMSListingFields, CREAAccessToken, CREAListingDataRaw } from './types';
 import axios from 'axios';
-import { IItemDelete, Item } from 'webflow-api/dist/api';
+import { randomBytes } from 'crypto';
+import { CollectionItem } from 'webflow-api/api';
 import { DOMAINS } from './constants';
 
-const webflow = new Webflow({ token: process.env.WEBFLOW_API_KEY });
+const webflow = new WebflowClient({ accessToken: process.env.WEBFLOW_API_KEY });
 
 /**
  * Fetch Webflow data for Luke Mori site
  * @returns {object} Object containing APi config, Site data, and Collection data (fields/items)
  */
-export const getWebflowData = async () => {
-  const config = webflow.config;
-  const site = await webflow.site({ siteId: process.env.WEBFLOW_SITE_ID });
-  const domains = await webflow.domains({ siteId: site._id });
-  const collection = await webflow.collection({
-    collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID
-  });
-  const itemsPerPage = 100; // Adjust the number of items per page as needed
-  let offset = 0;
-  let allItems = [];
-
+export const getWebflowSiteData = async () => {
   try {
-    while (true) {
-      const items = await collection.items({ limit: itemsPerPage, offset });
-
-      if (items.length === 0) {
-        // No more items to fetch, break the loop
-        break;
-      }
-
-      allItems = allItems.concat(items);
-      offset += itemsPerPage;
-    }
-
-    // Process allItems array
+    const site = await webflow.sites.get(process.env.WEBFLOW_SITE_ID);
+    const domains = site.customDomains;
+    const collections = await webflow.collections.list(
+      process.env.WEBFLOW_SITE_ID
+    );
+    return {
+      site: { ...site, domains },
+      collections: collections
+    };
   } catch (error) {
     // Handle error
     console.error(error);
+    throw new Error(`${error}`);
   }
-  return {
-    config,
-    site: { ...site, domains },
-    collection: { ...collection, items: allItems }
-  };
+};
+export const getWebflowCollectionData = async (collectionId) => {
+  try {
+    const collection = await webflow.collections.get(collectionId);
+
+    return collection;
+  } catch (error) {
+    // Handle error
+    console.error(error);
+    throw new Error(`${error}`);
+  }
+};
+
+export const getCollectionItems = async (collectionId: string) => {
+  try {
+    const data = await webflow.collections.items.listItems(collectionId);
+
+    return data;
+  } catch (error) {
+    console.log(error);
+    throw new Error(`error getting items: ${error}`);
+  }
+};
+
+export const getAllCollectionItems = async (collectionId: string) => {
+  try {
+    let allItems: CollectionItem[] = [];
+    let offset = 0;
+    const limit = 100; // Webflow's default limit
+
+    while (true) {
+      const response = await webflow.collections.items.listItems(collectionId, {
+        limit,
+        offset
+      });
+
+      allItems = allItems.concat(response.items);
+
+      if (response.items.length < limit) {
+        break;
+      }
+
+      offset += limit;
+    }
+
+    return allItems;
+  } catch (error) {
+    console.error('Error getting items:', error);
+    throw new Error(`Error getting items: ${error}`);
+  }
 };
 
 /**
  * Publishes New/Updated items in Webflow CMS
  * @param {string[]} itemIds Array of Webflow CMS Item ids
  */
-export const publishCMSData = async (itemIds: string[]) => {
-  try {
-    console.log('Publishing CMS Items');
-    await webflow
-      .publishItems({
-        itemIds,
-        collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID
-      })
-      .then(() => {
-        console.log('Items published successfully');
-      })
-      .catch(() => {
-        console.log('Problem publishing new CMS Items');
-      });
-  } catch (error) {
-    console.log('Error publishing items', error);
-  }
-};
+// export const publishCMSData = async (itemIds: string[]) => {
+//   try {
+//     console.log('Publishing CMS Items');
+//     await webflow
+//       .collections.items.publishItem({
+//         itemIds,
+//         collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID
+//       })
+//       .then(() => {
+//         console.log('Items published successfully');
+//       })
+//       .catch(() => {
+//         console.log('Problem publishing new CMS Items');
+//       });
+//   } catch (error) {
+//     console.log('Error publishing items', error);
+//   }
+// };
 
 /**
  * Publishes Webflow Site
@@ -86,11 +109,8 @@ export const publishCMSData = async (itemIds: string[]) => {
 export const publishSite = async () => {
   console.log('Publishing site');
   try {
-    await webflow
-      .publishSite({
-        siteId: process.env.WEBFLOW_SITE_ID,
-        domains: DOMAINS
-      })
+    await webflow.sites
+      .publish(process.env.WEBFLOW_SITE_ID, { customDomains: DOMAINS })
       .then(() => {
         console.log('Site successfully published');
       })
@@ -99,43 +119,54 @@ export const publishSite = async () => {
       });
   } catch (error) {
     console.log('Error publishing site', error);
+  } finally {
+    console.log('Site Publishing Finished');
   }
 };
 
 /**
  *
- * @param {CREALlistingDataRaw[]} listings
+ * @param {CREAListingDataRaw[]} listings
  * @param {RawCMSFields[]} items
  * @returns Array of deleted Webflow CMS items
  */
 export const removeObsoleteCMSItems = async (
-  listings: CREALlistingDataRaw[],
-  items: RawCMSFields[]
+  listings: CREAListingDataRaw[],
+  items: CollectionItem[]
 ) => {
   console.log(
     'Checking CREA data for any removed listings for Webflow CMS cleanup...'
   );
   try {
-    const listingKeys = listings.map((listing) => listing.ListingKey);
-
-    const itemsToDelete = items.filter(
-      (item) => !listingKeys.includes(item['idnum'])
+    const listingKeys = listings.map((listing) =>
+      listing.ListingKey.toString()
     );
 
-    const deletedItems: IItemDelete[] = [];
+    const itemsToDelete = items.filter(
+      (item) =>
+        !listingKeys.includes(
+          item.fieldData?.['listingkey']?.toString() as string
+        )
+    );
+
+    const deletedItems = [];
 
     const chunks = chunkArray(itemsToDelete, 100);
 
     for (const chunk of chunks) {
-      const chunkOperations = chunk.map(async (item) => {
+      const chunkOperations = chunk.map(async (item: CollectionItem) => {
         try {
-          await webflow.removeItem({
-            collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID,
-            itemId: item._id
+          await webflow.collections.items.deleteItem(
+            process.env.WEBFLOW_LISTING_COLLECTION_ID,
+            item.id
+          );
+          console.log('deleting item', {
+            id: item.id,
+            slug: item.fieldData?.slug || 'slug not found'
           });
-          return item._id;
+          return item.id;
         } catch (error) {
-          console.log(`Error removing item: ${item._id}`, error);
+          console.log(`Error removing item: ${item.id}`, error);
           return null;
         }
       });
@@ -151,7 +182,44 @@ export const removeObsoleteCMSItems = async (
     return deletedItems;
   } catch (error) {
     console.log(error);
-    throw new Error('Something went wrong cleanung up CMS');
+    throw new Error('Something went wrong cleaning up CMS');
+  }
+};
+
+/**
+ * Dump CREA Listing Data from Webflow Collection
+ */
+export const dumpCollection = async () => {
+  try {
+    const items: CollectionItem[] = await getAllCollectionItems(
+      process.env.WEBFLOW_LISTING_COLLECTION_ID
+    );
+    await waitForCMSTimeout();
+
+    const chunks: CollectionItem[][] = chunkArray(items, 120);
+    let newItems = [];
+
+    for (const chunk of chunks) {
+      const chunkOperations = chunk.map(async (item) => {
+        try {
+          await webflow.collections.items.deleteItem(
+            process.env.WEBFLOW_LISTING_COLLECTION_ID,
+            item.id
+          );
+        } catch (error) {
+          console.log(`Error deleting item: ${item.id}`, error);
+          return null;
+        }
+      });
+
+      const chunkResults = await Promise.all(chunkOperations);
+      newItems.push(...chunkResults);
+
+      await new Promise((resolve) => setTimeout(resolve, 60 * 1000));
+    }
+    console.log('Successfully dumped CMS Collection');
+  } catch (error) {
+    console.log(error);
   }
 };
 
@@ -234,24 +302,43 @@ const getCREAMember = async (memberKey: string, token: CREAAccessToken) => {
   }
 };
 
+export const getSingleCREAListing: (
+  token: CREAAccessToken,
+  id: string
+) => Promise<any> = async (token, id) => {
+  const baseUrl = process.env.BASE_API_URL; // Replace with your API endpoint
+  try {
+    const response = await axios.get(`${baseUrl}/Property/${id}`, {
+      headers: { Authorization: `${token.token_type} ${token.access_token}` }
+    });
+
+    return response.data;
+  } catch (error) {
+    const errorObj = error as any;
+    console.log(errorObj.response as any);
+  }
+};
+
 /**
  * Fetch al CREA listings in National Pool
  * @returns Detailed array of CREA Listings
  */
 export const getCREAListingsData: (
   token: CREAAccessToken
-) => Promise<CREALlistingDataRaw[]> = async (token) => {
+) => Promise<{ listings: CREAListingDataRaw[]; count: number }> = async (
+  token
+) => {
   // const pageSize = 100; // Number of results per page
-  const baseUrl = 'https://ddfapi.realtor.ca/odata/v1/Property'; // Replace with your API endpoint
+  const baseUrl = process.env.BASE_API_URL; // Replace with your API endpoint
 
   let allData = [];
 
-  let nextLink = baseUrl;
+  let nextLink = baseUrl + '/Property';
   let totalCount = 0; // Set the initial totalCount value to a known value or fetch it separately if available
   let fetchedCount = 0;
 
   try {
-    const response = await axios.get(`${baseUrl}?$count=true`, {
+    const response = await axios.get(`${baseUrl}/Property?$count=true`, {
       headers: { Authorization: `${token.token_type} ${token.access_token}` }
     });
     totalCount = response.data['@odata.count'];
@@ -283,14 +370,11 @@ export const getCREAListingsData: (
   const finalData = await Promise.all(
     (allData = allData.map(async (listing) => ({
       ...listing,
-      agent: await getCREAMember(listing.ListAgentKey, token),
-      agent2: listing.CoListAgentKey
-        ? await getCREAMember(listing.CoListAgentKey, token)
-        : null
+      agent: await getCREAMember(listing.ListAgentKey, token)
     })))
   );
 
-  return finalData;
+  return { listings: finalData, count: totalCount };
 };
 
 /**
@@ -298,47 +382,45 @@ export const getCREAListingsData: (
  * @param listing
  * @returns Webflow CMS Listing object
  */
-const shapeCMSFields: (listing: CREALlistingDataRaw) => CMSListingFields = (
-  listing: CREALlistingDataRaw
-) => {
-  const waterfrontTerms = [
-    'waterfront',
-    'beachfront',
-    'water front',
-    'beach front'
-  ];
-  const fields: CMSListingFields = {
-    idnum: listing.ListingKey,
-    listingid: listing.ListingId,
-    'agentdetails-name': `${listing?.agent?.MemberFirstName} ${listing?.agent?.MemberLastName}`,
-    'agentdetails-office-name': listing?.agent?.office?.OfficeName,
-    'agent2details-name': `${listing?.agent2?.MemberFirstName} ${listing?.agent2?.MemberLastName}`,
-    'agent2details-office-name': listing?.agent2?.office?.OfficeName,
-    'building-fireplacepresent': listing.FireplaceYN ? 'Yes' : 'No',
-    'building-utilitywater': listing.WaterSource.join(', '),
-    'land-sizetotaltext':
-      listing?.LotSizeArea && listing?.LotSizeUnits === 'square feet'
-        ? `${listing?.LotSizeArea?.toLocaleString()} sqft.`
-        : null,
-    'land-sewer': listing?.Sewer.join(', '),
-    'address-streetaddress': listing.UnparsedAddress,
-    'address-city': listing.City,
-    'address-communityname': listing.SubdivisionName,
-    ownershiptype: listing.CommonInterest,
-    propertytype: listing.PropertySubType,
-    zoningtype: listing.Zoning,
-    'building-bathroomtotal': listing?.BathroomsTotalInteger?.toString(),
-    'building-bedroomstotal': listing?.BedroomsTotal?.toString(),
-    'building-appliances': listing?.Appliances.join(', '),
-    'building-basementtype': listing?.Basement.join(', '),
-    'building-constructeddate': listing?.YearBuilt?.toString(),
-    'building-exteriorfinish': listing?.ExteriorFeatures.join(', '),
-    'building-flooringtype': listing?.Flooring.join(', '),
-    'building-foundationtype': listing?.FoundationDetails.join(', '),
-    'building-heatingtype': listing?.Heating.join(', '),
-    'building-roofmaterial': listing?.Roof.join(', '),
-    parkingspacetotal: listing?.ParkingTotal?.toString(),
-    images:
+
+export const shapeCMSFields = (
+  listing: CREAListingDataRaw
+): CMSListingFields => {
+  const featuredImage = listing?.Media?.find(
+    (media) => media.PreferredPhotoYN === true
+  );
+  return {
+    name: listing.UnparsedAddress || '',
+    listingid: listing.ListingId || '',
+    listingkey: listing.ListingKey || '',
+    propertysubtype: listing.PropertySubType || '',
+    lotsizearea: listing.LotSizeArea || 0,
+    lotsizedimensions: listing.LotSizeDimensions || '',
+    lotsizeunits: listing.LotSizeUnits || '',
+    publicremarks: listing.PublicRemarks?.replace(' (id:58303)', '') || '',
+    listprice: listing.ListPrice || 0,
+    commoninterest: listing.CommonInterest || '',
+    city: listing.City || '',
+    yearbuilt: listing.YearBuilt || 0,
+    livingarea: listing.LivingArea || 0,
+    livingareaunits: listing.LivingAreaUnits || '',
+    zoning: listing.Zoning || '',
+    'communityfeatures-0': listing?.CommunityFeatures?.join(', ') || '',
+    'exteriorfeatures-0': listing.ExteriorFeatures?.join(', ') || '',
+    'heating-0': listing.Heating?.join(', ') || '',
+    'buildingfeatures-0': listing.BuildingFeatures?.join(', ') || '',
+    'flooring-0': listing.Flooring?.join(', ') || '',
+    'sewer-0': listing.Sewer?.join(', ') || '',
+    'watersource-0': listing.WaterSource?.join(', ') || '',
+    'lotfeatures-0': listing.LotFeatures?.join(', ') || '',
+    'electric-0': listing.Electric?.join(', ') || '',
+    agentname: `${listing.agent.MemberFirstName || ''} ${
+      listing.agent.MemberLastName || ''
+    }`,
+    'featured-image':
+      { url: featuredImage?.MediaURL, alt: featuredImage?.LongDescription } ||
+      null,
+    photos1:
       listing?.Media?.length > 25
         ? listing.Media.slice(0, 25)
             .filter((media) => media.MediaCategory === 'Property Photo')
@@ -352,7 +434,7 @@ const shapeCMSFields: (listing: CREALlistingDataRaw) => CMSListingFields = (
             url: img.MediaURL,
             alt: img.LongDescription
           })),
-    images2:
+    photos2:
       listing?.Media?.length > 25
         ? listing.Media.slice(25, 50)
             .filter((media) => media.MediaCategory === 'Property Photo')
@@ -361,51 +443,27 @@ const shapeCMSFields: (listing: CREALlistingDataRaw) => CMSListingFields = (
               alt: img.LongDescription
             }))
         : null,
-    images3:
+    photos3:
       listing?.Media?.length > 50
-        ? listing.Media.slice(50, listing.Media.length - 1)
+        ? listing.Media.slice(50, 75)
             .filter((media) => media.MediaCategory === 'Property Photo')
             .map((img) => ({
               url: img.MediaURL,
               alt: img.LongDescription
             }))
         : null,
-    'publicremarks-2': listing.PublicRemarks,
-    'rooms-above-3': getFilteredRoomData(
-      listing?.Rooms.filter((room) => room.RoomLevel === 'Above')
-    ),
-    'rooms-lowerlevel-3': getFilteredRoomData(
-      listing?.Rooms.filter((room) => room.RoomLevel === 'Lower level')
-    ),
-    'rooms-mainlevel-3': getFilteredRoomData(
-      listing?.Rooms.filter((room) => room.RoomLevel === 'Main level')
-    ),
-    video:
-      listing?.Media?.filter(
-        (media) => media.MediaCategory === 'Video Tour Website'
-      )[0]?.MediaURL || null,
-    priceint: listing.ListPrice,
-    'building-sizeinterior-int': listing.LivingArea,
-    'building-constructionmaterial': listing?.ConstructionMaterials.join(', '),
-    mainimage:
-      listing?.Media?.filter(
-        (media) => media.MediaCategory === 'Property Photo'
-      ).map((media) => ({
-        url: media?.MediaURL,
-        alt: media?.LongDescription
-      }))[0] || null,
-    waterfront: waterfrontTerms.some((str) =>
-      listing?.PublicRemarks?.toLowerCase().includes(str)
-    ),
-    name: listing.UnparsedAddress || '',
-    'agent-data-full': formatAgentData(listing.agent),
-    'agent2-data-full': formatAgentData(listing.agent2),
-    _archived: false,
-    _draft: false,
+    photos4:
+      listing?.Media?.length > 75
+        ? listing.Media.slice(75, listing.Media.length - 1)
+            .filter((media) => media.MediaCategory === 'Property Photo')
+            .map((img) => ({
+              url: img.MediaURL,
+              alt: img.LongDescription
+            }))
+        : null,
+    officename: listing.agent.office.OfficeName || '',
     slug: listing.UnparsedAddress ? slugify(listing.UnparsedAddress) : ''
   };
-
-  return fields;
 };
 
 /**
@@ -415,40 +473,51 @@ const shapeCMSFields: (listing: CREALlistingDataRaw) => CMSListingFields = (
  * @returns New array of synced listings in Webflow CMS
  */
 export const syncDataWithCMS = async (
-  listings: CREALlistingDataRaw[],
-  items: RawCMSFields[]
+  listings: CREAListingDataRaw[],
+  items: CollectionItem[]
 ) => {
   console.log('Syncing webflow CMS with CREA data...');
   try {
-    const chunks: CREALlistingDataRaw[][] = chunkArray(listings, 100);
-    let newItems: Item[] = [];
+    const chunks: CREAListingDataRaw[][] = chunkArray(listings, 100);
+    let newItems = [];
 
     for (const chunk of chunks) {
       const chunkOperations = chunk.map(async (listing) => {
+        // console.log(listing.ListingKey);
         try {
           const existingItem = items.find(
-            (item) => item['idnum'] === listing.ListingKey
+            (item) =>
+              item.fieldData?.['listingkey'].toString() ===
+              listing.ListingKey.toString()
           );
           if (existingItem) {
-            const updatedListing = await webflow.patchItem({
-              collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID,
-              itemId: existingItem._id,
-              ...{
-                ...shapeCMSFields(listing),
-                name: existingItem.name,
-                slug: existingItem.slug
-              }
-            });
-            return updatedListing;
+            const { slug, ...rest } = shapeCMSFields(listing);
+
+            return await webflow.collections.items.updateItem(
+              process.env.WEBFLOW_LISTING_COLLECTION_ID,
+              existingItem.id,
+              { id: existingItem.id, fieldData: rest as any }
+            );
           } else {
-            const newListing = await webflow.createItem({
-              collectionId: process.env.WEBFLOW_LISTING_COLLECTION_ID,
-              fields: shapeCMSFields(listing)
-            });
-            return newListing;
+            const fields = shapeCMSFields(listing);
+            const id = randomBytes(16).toString('hex');
+            const newItem = await webflow.collections.items.createItem(
+              process.env.WEBFLOW_LISTING_COLLECTION_ID,
+              {
+                id,
+                fieldData: fields as any
+              }
+            );
+            console.log('Creating new entry: ', newItem.id);
+            return newItem;
           }
         } catch (error) {
-          console.log(`Error processing listing ${listing.ListingKey}`, error);
+          console.log(
+            `Error processing listing ${listing.ListingKey}: ${JSON.stringify(
+              listing
+            )}`,
+            error
+          );
           return null;
         }
       });
