@@ -65,7 +65,7 @@ cron.schedule(
   }
 );
 
-const api = express.Router();
+// const api = express.Router();
 
 // Version the api
 // app.use('/api/v1', api);
