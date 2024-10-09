@@ -68,7 +68,7 @@ cron.schedule(
 const api = express.Router();
 
 // Version the api
-app.use('/api/v1', api);
+// app.use('/api/v1', api);
 
 /*
   Test Endpoints (Should remain commented out to prevent exposure when not running locally)
